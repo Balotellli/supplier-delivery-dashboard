@@ -1,288 +1,280 @@
-"""Supplier Delivery Performance Dashboard.
-
-A compact Streamlit view of supplier metrics and individual purchase-order
-records exported from a KNIME Analytics Platform workflow. Synthetic data only.
-"""
-
+"""Supplier delivery dashboard for the original KNIME CSV exports (Material design)."""
 from pathlib import Path
 
-import altair as alt
 import numpy as np
 import pandas as pd
 import streamlit as st
 
-
-st.set_page_config(
-    page_title="Supplier Delivery Performance Dashboard",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
-
+st.set_page_config(page_title="Supplier Delivery Performance Dashboard", layout="wide")
 BASE_DIR = Path(__file__).resolve().parent
-NAVY = "#0A1420"
-SLATE = "#172431"
-YELLOW = "#F4C95D"
-BLUE = "#6299D5"
-PALE = "#F5F7FB"
-MUTED = "#AAB8C8"
-GREY = "#7B8897"
-
 SUMMARY_COLUMNS = [
-    "supplier", "total_orders", "avg_delay_days", "avg_fill_rate_percent",
-    "high_priority_orders",
+    "supplier", "total_orders", "avg_delay_days", "avg_fill_rate_percent", "high_priority_orders"
 ]
 ORDER_COLUMNS = [
-    "order_id", "order_date", "supplier", "part_category", "ordered_qty",
-    "delivered_qty", "planned_lead_days", "actual_lead_days",
-    "unit_cost_eur", "delivery_delay_days", "fill_rate_percent",
-    "issue_priority", "high_priority_flag",
+    "order_id", "order_date", "supplier", "part_category", "ordered_qty", "delivered_qty",
+    "planned_lead_days", "actual_lead_days", "unit_cost_eur", "delivery_delay_days",
+    "fill_rate_percent", "issue_priority", "high_priority_flag"
 ]
+
+# Material icon paths (24x24 viewBox)
+ICONS = {
+    "orders": "M3 13h2v-2H3v2zm0 4h2v-2H3v2zm0-8h2V7H3v2zm4 4h14v-2H7v2zm0 4h14v-2H7v2zM7 7v2h14V7H7z",
+    "on_time": "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm-2 15l-5-5 1.41-1.41L10 14.17l7.59-7.59L19 8l-9 9z",
+    "fill": "M11 2v20c-5.07-.5-9-4.79-9-10s3.93-9.5 9-10zm2.03 0v8.99H22c-.47-4.74-4.24-8.52-8.97-8.99zm0 11.01V22c4.74-.47 8.5-4.25 8.97-8.99h-8.97z",
+    "high": "M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm1 15h-2v-2h2v2zm0-4h-2V7h2v6z",
+}
 
 
 @st.cache_data(show_spinner=False)
-def load_csv(path: str, modified_ns: int) -> pd.DataFrame:
-    """Read the KNIME export and refresh the cache after its file changes."""
-    return pd.read_csv(path, encoding="utf-8-sig")
-
-
-def read_export(name: str, required_columns: list[str]) -> pd.DataFrame:
-    path = BASE_DIR / name
-    if not path.is_file():
-        raise ValueError(f"Missing {name}. Place it in the same folder as app.py.")
-    df = load_csv(str(path), path.stat().st_mtime_ns).copy()
-    missing = sorted(set(required_columns) - set(df.columns))
+def load_csv(path: str, modified_ns: int, required: tuple[str, ...]) -> pd.DataFrame:
+    """Cache each export; its modification time invalidates the cached data."""
+    df = pd.read_csv(path, encoding="utf-8-sig")
+    missing = sorted(set(required) - set(df.columns))
     if missing:
-        raise ValueError(f"{name} is missing columns: {', '.join(missing)}")
+        raise ValueError(f"{Path(path).name}: missing required columns: {', '.join(missing)}")
     return df
 
 
-def require_numbers(df: pd.DataFrame, names: list[str], filename: str) -> None:
-    for name in names:
-        values = pd.to_numeric(df[name], errors="coerce")
+def read_export(name: str, columns: list[str]) -> pd.DataFrame:
+    path = BASE_DIR / name
+    if not path.is_file():
+        raise ValueError(f"Missing file: {name}. Place the original KNIME CSV beside app.py.")
+    return load_csv(str(path), path.stat().st_mtime_ns, tuple(columns)).copy()
+
+
+def validate_numeric(df: pd.DataFrame, columns: list[str], name: str) -> None:
+    for column in columns:
+        values = pd.to_numeric(df[column], errors="coerce")
         if not np.isfinite(values.to_numpy(dtype=float)).all():
-            raise ValueError(f"{filename}: '{name}' contains a missing or invalid number.")
-        df[name] = values
+            raise ValueError(f"{name}: '{column}' contains missing or invalid numeric values.")
+        df[column] = values
 
 
-def chart_style(chart: alt.Chart | alt.LayerChart) -> alt.Chart | alt.LayerChart:
-    """Apply a restrained dark theme to each Altair chart."""
+def calculate_kpis(orders: pd.DataFrame) -> tuple[int, float | None, float | None, int]:
+    count = len(orders)
     return (
-        chart.configure_view(stroke=None)
-        .configure_axis(
-            labelColor=MUTED, titleColor=MUTED, labelFontSize=12,
-            titleFontSize=11, gridColor="#2B3745", domain=False,
-            tickColor="#2B3745",
-        )
-        .configure_title(color=PALE)
+        count,
+        float(orders["delivery_delay_days"].le(0).mean() * 100) if count else None,
+        float(orders["fill_rate_percent"].mean()) if count else None,
+        int(orders["issue_priority"].eq("High").sum()),
     )
 
 
+def kpi_card(label: str, value: str, note: str, icon: str, tone: str, delay_ms: int) -> str:
+    return f"""
+    <div class="kpi kpi-{tone}" style="animation-delay:{delay_ms}ms">
+      <div class="kpi-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="{ICONS[icon]}"/></svg></div>
+      <div class="kpi-label">{label}</div>
+      <div class="kpi-value">{value}</div>
+      <div class="kpi-note">{note}</div>
+    </div>"""
+
+
+def priority_style(value: str) -> str:
+    colors = {
+        "High": "background-color:#fce8e6;color:#a50e0e;font-weight:500",
+        "Medium": "background-color:#fef7e0;color:#8a5a00;font-weight:500",
+        "Low": "background-color:#e6f4ea;color:#0d652d;font-weight:500",
+    }
+    return colors.get(value, "")
+
+
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Roboto+Flex:wght@400;500;600;700&family=Roboto:wght@400;500&display=swap');
+
+:root {
+    --primary: #1a73e8;  --primary-container: #d3e3fd;  --on-primary-container: #041e49;
+    --green: #1e8e3e;    --green-container: #ddf3e4;
+    --amber: #f9ab00;    --amber-container: #fdf0c9;
+    --red: #d93025;      --red-container: #fcdad7;
+    --surface: #ffffff;  --background: #f4f6fb;  --outline: #dadce0;
+    --text: #1f1f1f;     --text-muted: #5f6368;
+    --shadow-1: 0 1px 2px rgba(60,64,67,.30), 0 1px 3px 1px rgba(60,64,67,.15);
+    --shadow-2: 0 1px 3px rgba(60,64,67,.30), 0 4px 8px 3px rgba(60,64,67,.15);
+    --ease: cubic-bezier(.2, 0, 0, 1);
+}
+
+html, body, .stApp, [data-testid="stAppViewContainer"] {
+    background: var(--background); color: var(--text);
+    font-family: 'Roboto', system-ui, sans-serif;
+}
+[data-testid="stHeader"] {background: transparent;}
+.block-container {max-width: 1400px; padding-top: 2rem; padding-bottom: 4rem;}
+h1, h2, h3, .kpi-value {font-family: 'Roboto Flex', 'Roboto', sans-serif; color: var(--text);}
+h3 {font-weight: 500; letter-spacing: 0;}
+
+/* Hero */
+.hero {
+    background: linear-gradient(120deg, var(--primary-container) 0%, #e8f0fe 55%, #fde7f3 100%);
+    border-radius: 28px; padding: 2.2rem 2.4rem; margin-bottom: 1.5rem; box-shadow: var(--shadow-1);
+}
+.hero h1 {margin: 0; font-size: 2.3rem; font-weight: 600; letter-spacing: -0.02em; color: var(--on-primary-container);}
+.hero p {margin: .5rem 0 0; color: #3c4a63; font-size: 1.05rem; max-width: 62ch;}
+
+/* KPI cards */
+.kpi-row {display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 1rem; margin-bottom: .6rem;}
+.kpi {
+    background: var(--surface); border-radius: 20px; padding: 1.2rem 1.3rem; box-shadow: var(--shadow-1);
+    transition: box-shadow .25s var(--ease), transform .25s var(--ease);
+    animation: rise .5s var(--ease) both;
+}
+.kpi:hover {box-shadow: var(--shadow-2); transform: translateY(-2px);}
+.kpi-icon {width: 42px; height: 42px; border-radius: 14px; display: grid; place-items: center; margin-bottom: .8rem;}
+.kpi-icon svg {width: 24px; height: 24px; fill: currentColor;}
+.kpi-blue .kpi-icon {background: var(--primary-container); color: var(--primary);}
+.kpi-green .kpi-icon {background: var(--green-container); color: var(--green);}
+.kpi-amber .kpi-icon {background: var(--amber-container); color: #b06000;}
+.kpi-red .kpi-icon {background: var(--red-container); color: var(--red);}
+.kpi-label {color: var(--text-muted); font-size: .92rem; font-weight: 500;}
+.kpi-value {font-size: 2.3rem; font-weight: 600; line-height: 1.15; margin: .15rem 0;}
+.kpi-note {color: var(--text-muted); font-size: .82rem;}
+@keyframes rise {from {opacity: 0; transform: translateY(12px);} to {opacity: 1; transform: none;}}
+
+/* Section cards (st.container(border=True)) */
+div[data-testid="stVerticalBlockBorderWrapper"] {
+    background: var(--surface); border: none !important; border-radius: 24px;
+    box-shadow: var(--shadow-1); padding: .6rem .8rem;
+}
+[data-testid="stDataFrame"] {border-radius: 16px; overflow: hidden;}
+
+/* Controls */
+[data-baseweb="select"] > div {border-radius: 12px !important; border-color: var(--outline) !important;}
+[data-baseweb="tag"] {background: var(--primary-container) !important; color: var(--on-primary-container) !important; border-radius: 8px !important;}
+.stDownloadButton button {
+    background: var(--primary); color: #fff; border: none; border-radius: 999px;
+    padding: .55rem 1.5rem; font-weight: 500; box-shadow: var(--shadow-1);
+    transition: box-shadow .2s var(--ease), background .2s var(--ease);
+}
+.stDownloadButton button:hover {background: #1765cc; color: #fff; box-shadow: var(--shadow-2);}
+.stDownloadButton button:disabled {background: #e8eaed; color: #9aa0a6; box-shadow: none;}
+button:focus-visible, [data-baseweb="select"]:focus-within {outline: 3px solid #8ab4f8 !important; outline-offset: 2px;}
+[data-testid="stCaptionContainer"] {color: var(--text-muted);}
+
+/* Legend chips */
+.chips {display: flex; flex-wrap: wrap; gap: .6rem; margin-top: .4rem;}
+.chip {border-radius: 10px; padding: .45rem .9rem; font-size: .88rem;}
+.chip-high {background: var(--red-container); color: #a50e0e;}
+.chip-med {background: var(--amber-container); color: #7a4f00;}
+.chip-low {background: var(--green-container); color: #0d652d;}
+
+@media (prefers-reduced-motion: reduce) {
+    .kpi {animation: none; transition: none;}
+    .kpi:hover {transform: none;}
+}
+</style>
+""", unsafe_allow_html=True)
+
 st.markdown(
     """
-    <style>
-      .stApp {background: #0A1420; color: #F5F7FB;}
-      .block-container {max-width: 1390px; padding-top: 2rem; padding-bottom: 3rem;}
-      h1, h2, h3 {color: #F5F7FB; letter-spacing: -0.025em;}
-      h2 {font-size: 1.4rem;}
-      [data-testid="stHeader"] {background: transparent;}
-      [data-testid="stMetric"] {
-        background: #172431; border: 1px solid #2A3A4C;
-        border-top: 3px solid #F4C95D; border-radius: 10px;
-        padding: 1.05rem 1.15rem;
-      }
-      [data-testid="stMetricLabel"] {color: #BFCAD6;}
-      [data-testid="stMetricValue"] {color: #F5F7FB;}
-      [data-testid="stVerticalBlockBorderWrapper"]:has(.chart-title) {
-        background: #13202D; border-radius: 12px;
-      }
-      .eyebrow {color:#F4C95D; font-size:.77rem; font-weight:700;
-        letter-spacing:.16em; padding-bottom:.45rem;}
-      .subtitle {color:#B4C1CF; margin-top:-.25rem; margin-bottom:1.2rem;}
-      .divider-line {border-top:1px solid #2A3A4C; margin:1.5rem 0 1.1rem;}
-      div.stButton > button[kind="primary"] {background:#F4C95D; color:#0A1420;}
-      .small-note {color:#AAB8C8; font-size:.86rem;}
-    </style>
-    <div class="eyebrow">SUPPLIER ANALYTICS / KNIME</div>
+    <div class="hero">
+      <h1>Supplier Delivery Performance Dashboard</h1>
+      <p>See which suppliers deliver on time, which ship incomplete orders, and where to follow up first.
+      Based on the KNIME delivery performance exports.</p>
+    </div>
     """,
-    unsafe_allow_html=True,
-)
-st.title("Delivery Performance Dashboard")
-st.markdown(
-    '<div class="subtitle">Purchase-order reliability, supplier comparisons, and delivery issues</div>',
     unsafe_allow_html=True,
 )
 
 try:
     summary = read_export("supplier_summary.csv", SUMMARY_COLUMNS)
     orders = read_export("supplier_orders_scored.csv", ORDER_COLUMNS)
-    require_numbers(summary, SUMMARY_COLUMNS[1:], "supplier_summary.csv")
-    require_numbers(
-        orders,
-        ["ordered_qty", "delivered_qty", "planned_lead_days", "actual_lead_days",
-         "unit_cost_eur", "delivery_delay_days", "fill_rate_percent", "high_priority_flag"],
-        "supplier_orders_scored.csv",
-    )
-    for filename, frame, columns in [
+    validate_numeric(summary, SUMMARY_COLUMNS[1:], "supplier_summary.csv")
+    validate_numeric(orders, ORDER_COLUMNS[4:11] + ["high_priority_flag"], "supplier_orders_scored.csv")
+    for name, frame, columns in [
         ("supplier_summary.csv", summary, ["supplier"]),
         ("supplier_orders_scored.csv", orders, ["order_id", "supplier", "issue_priority"]),
     ]:
-        for name in columns:
-            if frame[name].isna().any() or frame[name].astype(str).str.strip().eq("").any():
-                raise ValueError(f"{filename}: '{name}' contains blank values.")
+        for column in columns:
+            if frame[column].isna().any() or frame[column].astype(str).str.strip().eq("").any():
+                raise ValueError(f"{name}: '{column}' contains blank values.")
     if orders["order_id"].duplicated().any():
-        raise ValueError("Duplicate order IDs found in supplier_orders_scored.csv.")
+        raise ValueError("supplier_orders_scored.csv: duplicate order_id values; expected one row per purchase order.")
     if not orders["issue_priority"].isin(["High", "Medium", "Low"]).all():
-        raise ValueError("Issue priority must be High, Medium, or Low.")
-    if int(summary["total_orders"].sum()) != len(orders):
-        raise ValueError("Supplier totals do not match the number of order records.")
-    if int(summary["high_priority_orders"].sum()) != int(orders["issue_priority"].eq("High").sum()):
-        raise ValueError("High-priority counts differ between the two KNIME exports.")
-except (OSError, ValueError, pd.errors.ParserError) as error:
-    st.error(str(error))
+        raise ValueError("supplier_orders_scored.csv: issue_priority must contain only High, Medium, or Low.")
+except (OSError, ValueError, pd.errors.ParserError) as exc:
+    st.error(str(exc))
     st.stop()
 
-# Summary KPIs always represent the complete dataset; table filters act only below.
-order_count = len(orders)
-on_time_percent = 100 * orders["delivery_delay_days"].le(0).mean() if order_count else 0
-mean_fill_percent = orders["fill_rate_percent"].mean() if order_count else 0
-high_count = int(orders["issue_priority"].eq("High").sum())
-
-kpi_columns = st.columns(4, gap="medium")
-for column, label, value in zip(
-    kpi_columns,
-    ["Purchase orders", "On-time delivery", "Average fill rate", "High-priority orders"],
-    [f"{order_count:,}", f"{on_time_percent:.1f}%", f"{mean_fill_percent:.1f}%", f"{high_count:,}"],
-):
-    column.metric(label, value)
-
-st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
-st.subheader("Performance at a glance")
-
-# Percentages are based on each supplier's own order count, not raw counts.
-supplier_stats = summary.copy()
-supplier_stats["high_priority_rate"] = np.where(
-    supplier_stats["total_orders"].gt(0),
-    100 * supplier_stats["high_priority_orders"] / supplier_stats["total_orders"],
-    0,
+# ---- KPIs (all purchase orders) ----
+total, on_time, fill, high = calculate_kpis(orders)
+st.markdown(
+    '<div class="kpi-row">'
+    + kpi_card("Total Orders", f"{total:,}", "All purchase orders in the export", "orders", "blue", 0)
+    + kpi_card("On-Time Delivery Rate", f"{on_time:.1f}%" if on_time is not None else "N/A",
+               "Delivery delay of 0 days or less", "on_time", "green", 80)
+    + kpi_card("Average Fill Rate", f"{fill:.1f}%" if fill is not None else "N/A",
+               "Mean order-level fill rate, equal weight per order", "fill", "amber", 160)
+    + kpi_card("High-Priority Orders", f"{high:,}", "Orders classified High by KNIME", "high", "red", 240)
+    + "</div>",
+    unsafe_allow_html=True,
 )
-supplier_stats = supplier_stats.sort_values("high_priority_rate", ascending=False)
-priority_counts = (
-    orders["issue_priority"].value_counts().reindex(["High", "Medium", "Low"], fill_value=0)
-    .rename_axis("priority").reset_index(name="orders")
-)
+st.caption("KPIs cover all purchase orders. The filters below affect purchase order details and the CSV download only.")
 
-left_chart, right_chart = st.columns([1.35, 1], gap="large")
-with left_chart:
-    st.markdown("**High-priority rate by supplier**")
-    st.caption("Percentage of each supplier's orders classified as High priority")
-    bars = alt.Chart(supplier_stats).mark_bar(color=YELLOW, cornerRadiusEnd=5).encode(
-        x=alt.X(
-            "high_priority_rate:Q", title="High-priority orders (%)",
-            scale=alt.Scale(domain=[0, min(100, max(34, float(supplier_stats["high_priority_rate"].max()) + 9))]),
-            axis=alt.Axis(format=".0f"),
-        ),
-        y=alt.Y("supplier:N", sort="-x", title=None, axis=alt.Axis(labelLimit=170)),
-        tooltip=[
-            alt.Tooltip("supplier:N", title="Supplier"),
-            alt.Tooltip("total_orders:Q", title="Orders", format=".0f"),
-            alt.Tooltip("high_priority_orders:Q", title="High-priority orders", format=".0f"),
-            alt.Tooltip("high_priority_rate:Q", title="Rate (%)", format=".1f"),
-        ],
-    )
-    labels = bars.mark_text(align="left", baseline="middle", dx=7, color=PALE, fontSize=12).encode(
-        text=alt.Text("high_priority_rate:Q", format=".1f")
-    )
-    st.altair_chart(chart_style((bars + labels).properties(height=265)), use_container_width=True, theme=None)
+# ---- Supplier performance ----
+st.subheader("Supplier Performance")
+with st.container(border=True):
+    chart_col, table_col = st.columns([1, 1.3], gap="large")
+    with chart_col:
+        st.markdown("**Average delay by supplier (days)**")
+        st.bar_chart(summary.set_index("supplier")["avg_delay_days"], color="#1a73e8")
+    with table_col:
+        st.dataframe(
+            summary[SUMMARY_COLUMNS], hide_index=True, width="stretch",
+            column_config={
+                "supplier": st.column_config.TextColumn("Supplier"),
+                "total_orders": st.column_config.NumberColumn("Order Count", format="%d"),
+                "avg_delay_days": st.column_config.NumberColumn("Average Delay (days)", format="%.2f"),
+                "avg_fill_rate_percent": st.column_config.NumberColumn("Average Fill Rate", format="%.2f%%"),
+                "high_priority_orders": st.column_config.NumberColumn("High-Priority Orders", format="%d"),
+            },
+        )
+st.caption("Supplier figures are shown directly from supplier_summary.csv.")
 
-with right_chart:
-    st.markdown("**Delivery issue distribution**")
-    st.caption("Number of orders by KNIME priority classification")
-    bar = alt.Chart(priority_counts).mark_bar(cornerRadiusTopLeft=5, cornerRadiusTopRight=5).encode(
-        x=alt.X("priority:N", sort=["High", "Medium", "Low"], title=None),
-        y=alt.Y("orders:Q", title="Purchase orders", axis=alt.Axis(tickMinStep=1)),
-        color=alt.Color(
-            "priority:N", legend=None,
-            scale=alt.Scale(domain=["High", "Medium", "Low"], range=[YELLOW, BLUE, GREY]),
-        ),
-        tooltip=[alt.Tooltip("priority:N", title="Priority"), alt.Tooltip("orders:Q", title="Orders")],
-    )
-    count_labels = bar.mark_text(dy=-9, color=PALE, fontSize=13, fontWeight="bold").encode(text="orders:Q")
-    st.altair_chart(chart_style((bar + count_labels).properties(height=265)), use_container_width=True, theme=None)
+# ---- Purchase order details ----
+st.subheader("Purchase Order Details")
+with st.container(border=True):
+    left, right = st.columns([2, 1])
+    suppliers = sorted(orders["supplier"].unique().tolist())
+    selected_suppliers = left.multiselect("Supplier", suppliers, default=suppliers)
+    selected_priorities = right.multiselect("Issue Priority", ["High", "Medium", "Low"], default=["High", "Medium", "Low"])
+    filtered = orders.loc[
+        orders["supplier"].isin(selected_suppliers) & orders["issue_priority"].isin(selected_priorities)
+    ]
+    st.caption(f"Showing {len(filtered):,} of {total:,} purchase orders")
+    if filtered.empty:
+        st.info("No purchase orders match these filters. Select at least one supplier and issue priority.")
 
-if not supplier_stats.empty:
-    top = supplier_stats.iloc[0]
-    st.caption(
-        f"Highest High-priority rate: {top['supplier']} — "
-        f"{top['high_priority_rate']:.1f}% "
-        f"({int(top['high_priority_orders'])} of {int(top['total_orders'])} orders)."
+    styler = filtered.style
+    styled = (styler.map if hasattr(styler, "map") else styler.applymap)(priority_style, subset=["issue_priority"])
+    st.dataframe(
+        styled, hide_index=True, width="stretch",
+        column_config={
+            "order_id": "Order ID", "order_date": "Order Date", "supplier": "Supplier",
+            "part_category": "Part Category", "ordered_qty": "Ordered Quantity",
+            "delivered_qty": "Delivered Quantity", "planned_lead_days": "Planned Lead (days)",
+            "actual_lead_days": "Actual Lead (days)",
+            "unit_cost_eur": st.column_config.NumberColumn("Unit Cost (EUR)", format="%.2f"),
+            "delivery_delay_days": "Delivery Delay (days)",
+            "fill_rate_percent": st.column_config.NumberColumn("Fill Rate", format="%.2f%%"),
+            "issue_priority": "Issue Priority", "high_priority_flag": "High-Priority Flag",
+        },
+    )
+    st.download_button(
+        "Download Filtered Purchase Orders", data=filtered.to_csv(index=False).encode("utf-8"),
+        file_name="filtered_purchase_orders.csv", mime="text/csv", disabled=filtered.empty,
     )
 
-st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
-st.subheader("Supplier performance")
-st.caption("Aggregated KNIME results. Sorted by the share of High-priority orders.")
-
-performance = supplier_stats[
-    ["supplier", "total_orders", "avg_delay_days", "avg_fill_rate_percent",
-     "high_priority_orders", "high_priority_rate"]
-]
-st.dataframe(
-    performance, hide_index=True, use_container_width=True,
-    column_config={
-        "supplier": st.column_config.TextColumn("Supplier"),
-        "total_orders": st.column_config.NumberColumn("Orders", format="%d"),
-        "avg_delay_days": st.column_config.NumberColumn("Avg. delay (days)", format="%.2f"),
-        "avg_fill_rate_percent": st.column_config.NumberColumn("Avg. fill rate", format="%.1f%%"),
-        "high_priority_orders": st.column_config.NumberColumn("High-priority orders", format="%d"),
-        "high_priority_rate": st.column_config.NumberColumn("High-priority rate", format="%.1f%%"),
-    },
+# ---- Classification legend ----
+st.subheader("Issue Classifications")
+st.markdown(
+    """
+    <div class="chips">
+      <div class="chip chip-high"><b>High</b> · more than 3 days late or fill rate below 95%</div>
+      <div class="chip chip-med"><b>Medium</b> · late or incomplete without meeting High conditions</div>
+      <div class="chip chip-low"><b>Low</b> · on time and complete</div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
-
-st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
-st.subheader("Purchase-order details")
-filter_left, filter_right = st.columns([2, 1], gap="medium")
-with filter_left:
-    supplier_choices = sorted(orders["supplier"].unique().tolist())
-    chosen_suppliers = st.multiselect("Suppliers", supplier_choices, default=supplier_choices)
-with filter_right:
-    chosen_priorities = st.multiselect(
-        "Priority", ["High", "Medium", "Low"], default=["High", "Medium", "Low"]
-    )
-
-filtered = orders.loc[
-    orders["supplier"].isin(chosen_suppliers)
-    & orders["issue_priority"].isin(chosen_priorities)
-].copy()
-filtered["_sort_priority"] = filtered["issue_priority"].map({"High": 0, "Medium": 1, "Low": 2})
-filtered = filtered.sort_values(["_sort_priority", "order_date"], kind="stable").drop(columns="_sort_priority")
-st.caption(f"Showing {len(filtered):,} of {order_count:,} orders. Filters affect this table and its download only.")
-if filtered.empty:
-    st.info("No matching orders. Adjust the supplier or priority filters.")
-
-st.dataframe(
-    filtered, hide_index=True, use_container_width=True,
-    column_config={
-        "order_id": "Order ID", "order_date": "Order date", "supplier": "Supplier",
-        "part_category": "Part category", "ordered_qty": "Ordered quantity",
-        "delivered_qty": "Delivered quantity", "planned_lead_days": "Planned lead (days)",
-        "actual_lead_days": "Actual lead (days)",
-        "unit_cost_eur": st.column_config.NumberColumn("Unit cost (EUR)", format="%.2f"),
-        "delivery_delay_days": "Delay (days)",
-        "fill_rate_percent": st.column_config.NumberColumn("Fill rate", format="%.1f%%"),
-        "issue_priority": "Priority", "high_priority_flag": "High-priority flag",
-    },
-    height=290,
-)
-st.download_button(
-    "Download filtered orders",
-    data=filtered.to_csv(index=False).encode("utf-8"),
-    file_name="filtered_purchase_orders.csv",
-    mime="text/csv",
-    disabled=filtered.empty,
-)
-
-st.markdown('<div class="divider-line"></div>', unsafe_allow_html=True)
-st.caption(
-    "Classification rules: High = more than 3 days late or fill rate below 95%; "
-    "Medium = late or incomplete without meeting High conditions; Low = otherwise. "
-    "Synthetic dataset; rules assess completed orders, not future delivery risk."
-)
+st.caption("The dashboard displays the issue priorities exported by KNIME.")
